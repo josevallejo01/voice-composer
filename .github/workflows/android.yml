@@ -28,19 +28,34 @@ jobs:
         with:
           gradle-version: 8.10.2
 
+      # The Gradle project is wherever settings.gradle(.kts) is: the repository root, or a sub-folder
+      # when the project folder itself was uploaded instead of its content.
+      - name: Locate the Gradle project
+        id: root
+        run: |
+          f=$(find . -maxdepth 3 \( -name settings.gradle.kts -o -name settings.gradle \) -not -path './.git/*' | head -1)
+          if [ -z "$f" ]; then
+            echo "::error::No settings.gradle.kts found. Files in the repository:"
+            find . -maxdepth 3 -not -path './.git/*' | head -50
+            exit 1
+          fi
+          dir=$(dirname "$f")
+          echo "Gradle project found in: $dir"
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
       - name: Build debug APK
-        run: gradle assembleDebug --stacktrace
+        run: gradle -p "${{ steps.root.outputs.dir }}" assembleDebug --stacktrace
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: voice-composer-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: ${{ steps.root.outputs.dir }}/app/build/outputs/apk/debug/*.apk
 
       # Unit tests (music model, engine, exporters). They do not block the APK.
       - name: Unit tests
         continue-on-error: true
-        run: gradle :core:music-model:test :engine:test :data:export:test --stacktrace
+        run: gradle -p "${{ steps.root.outputs.dir }}" :core:music-model:test :engine:test :data:export:test --stacktrace
 
       - name: Upload test reports
         if: always()
@@ -48,5 +63,5 @@ jobs:
         with:
           name: test-reports
           path: |
-            **/build/reports/tests/
+            ${{ steps.root.outputs.dir }}/**/build/reports/tests/
           if-no-files-found: ignore
