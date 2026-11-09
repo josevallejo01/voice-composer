@@ -56,7 +56,34 @@ jobs:
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
 
       - name: Build debug APK
-        run: gradle -p "${{ steps.root.outputs.dir }}" assembleDebug --stacktrace
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle -p "${{ steps.root.outputs.dir }}" assembleDebug --continue --console=plain --stacktrace 2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      # On failure: show only the useful part (compiler errors) on the run's Summary page,
+      # which is much easier to read and copy than the full log, and keep the full log as an artifact.
+      - name: Summarize build errors
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "## Build errors"
+            echo '```'
+            grep -E "^e: " "$RUNNER_TEMP/build.log" | sed 's#file://[^ ]*/unpacked/##; s#file://[^ ]*/work/[^/]*/[^/]*/##' | sort -u | head -150
+            echo '```'
+            echo "## What went wrong"
+            echo '```'
+            grep -A12 "What went wrong" "$RUNNER_TEMP/build.log" | head -60
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload full build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: ${{ runner.temp }}/build.log
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
