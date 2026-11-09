@@ -28,6 +28,18 @@ jobs:
         with:
           gradle-version: 8.10.2
 
+      # Convenience for uploads from a phone: GitHub does not unzip files, so if the repository only
+      # contains voice-composer.zip (or any .zip with the project), unpack it here.
+      - name: Unpack project zip if needed
+        run: |
+          if [ -z "$(find . -maxdepth 3 \( -name settings.gradle.kts -o -name settings.gradle \) -not -path './.git/*' | head -1)" ]; then
+            for z in ./*.zip; do
+              [ -e "$z" ] || continue
+              echo "Unpacking $z"
+              unzip -q -o "$z" -d ./unpacked
+            done
+          fi
+
       # The Gradle project is wherever settings.gradle(.kts) is: the repository root, or a sub-folder
       # when the project folder itself was uploaded instead of its content.
       - name: Locate the Gradle project
@@ -58,7 +70,7 @@ jobs:
         run: gradle -p "${{ steps.root.outputs.dir }}" :core:music-model:test :engine:test :data:export:test --stacktrace
 
       - name: Upload test reports
-        if: always()
+        if: always() && steps.root.outputs.dir != ''
         uses: actions/upload-artifact@v4
         with:
           name: test-reports
