@@ -92,6 +92,11 @@ jobs:
           path: ${{ steps.root.outputs.dir }}/app/build/outputs/apk/debug/*.apk
 
       # Unit tests (music model, engine, exporters). They do not block the APK.
+      # onnxruntime lets the engine tests run the real Basic Pitch model on the runner (they skip themselves without it).
+      - name: Install Python onnxruntime for the model tests
+        continue-on-error: true
+        run: python3 -m pip install --quiet onnxruntime numpy
+
       - name: Unit tests
         continue-on-error: true
         run: gradle -p "${{ steps.root.outputs.dir }}" :core:music-model:test :engine:test :data:export:test --stacktrace
