@@ -1,0 +1,107 @@
+name: Train models on real recordings
+
+# Run it by hand (Actions -> "Train models on real recordings" -> Run workflow). It downloads public corpora of REAL
+# humming and singing with reference notes (HumTrans on Hugging Face, vocadito via mirdata), runs every clip through the
+# Basic Pitch network and the engine, retrains the note classifier and the note merger on those real rows (mixed with the
+# simulated ones), and measures the whole detector on real test clips BEFORE and AFTER. The new models are committed to
+# trained-models/ only if they win on validation and do not lose on test; the usual build then packs them into the APK.
+# The report (tables of precision / recall / F1) is in the run summary and in the artifacts either way.
+on:
+  workflow_dispatch:
+    inputs:
+      max_train: { description: "Real training clips (max)", default: "6000" }
+      max_val: { description: "Validation clips (max)", default: "600" }
+      max_test: { description: "Test clips (max)", default: "900" }
+      sim_clips: { description: "Simulated clips mixed in (0 = none; about 10 minutes per 1000)", default: "1000" }
+      min_gain: { description: "Required gain in onset F1 on validation to ship", default: "0.005" }
+      only: { description: "Corpus to use: humtrans, vocadito, or empty for both", default: "" }
+
+permissions:
+  contents: write
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: 8.10.2 }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+
+      - name: Unpack project zip if needed
+        run: |
+          if [ -z "$(find . -maxdepth 3 \( -name settings.gradle.kts -o -name settings.gradle \) -not -path './.git/*' | head -1)" ]; then
+            for z in ./*.zip; do [ -e "$z" ] || continue; unzip -q -o "$z" -d ./unpacked; done
+          fi
+      - name: Locate the Gradle project
+        id: root
+        run: |
+          f=$(find . -maxdepth 3 \( -name settings.gradle.kts -o -name settings.gradle \) -not -path './.git/*' | head -1)
+          [ -n "$f" ] || { echo "::error::No settings.gradle.kts found"; exit 1; }
+          echo "dir=$(cd "$(dirname "$f")" && pwd)" >> "$GITHUB_OUTPUT"
+
+      - name: Tools
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          pip install --quiet numpy scikit-learn onnxruntime huggingface_hub pretty_midi mirdata
+          sudo mkdir -p /mnt/real && sudo chown "$USER" /mnt/real
+          df -h /mnt | tail -1
+
+      - name: Compile the engine and its test tools
+        run: gradle -p "${{ steps.root.outputs.dir }}" :engine:compileTestKotlin --console=plain
+
+      - name: Download and prepare the real corpora
+        run: |
+          python3 "${{ steps.root.outputs.dir }}/tools/real/prepare_real.py" --out /mnt/real/corpus \
+            --max-train ${{ inputs.max_train }} --max-val ${{ inputs.max_val }} --max-test ${{ inputs.max_test }} \
+            ${{ inputs.only != '' && format('--only {0}', inputs.only) || '' }} 2>&1 | tee /mnt/real/prepare.log
+
+      - name: Simulated rows to mix in
+        if: ${{ inputs.sim_clips != '0' }}
+        run: |
+          set -o pipefail
+          bash "${{ steps.root.outputs.dir }}/tools/gen_data.sh" /mnt/real/sim_train.csv 1 ${{ inputs.sim_clips }} train 2>&1 | tail -5
+
+      - name: Train, evaluate before and after, decide
+        env:
+          MANIFEST: /mnt/real/corpus/manifest.tsv
+          WORK: /mnt/real/work
+          MAX_TRAIN: ${{ inputs.max_train }}
+          MAX_VAL: ${{ inputs.max_val }}
+          MAX_TEST: ${{ inputs.max_test }}
+          MIN_GAIN: ${{ inputs.min_gain }}
+        run: |
+          [ "${{ inputs.sim_clips }}" != "0" ] && export SIM_CSV=/mnt/real/sim_train.csv
+          bash "${{ steps.root.outputs.dir }}/tools/real/run_pipeline.sh" 2>&1 | tee /mnt/real/pipeline.log
+          { echo "## Real-data training"; cat /mnt/real/corpus/corpus_summary.txt | sed 's/^/* /'; echo; cat /mnt/real/work/report.md; echo; echo '```'; cat /mnt/real/work/train_note.txt /mnt/real/work/train_merge.txt 2>/dev/null; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: training-report-and-models
+          path: |
+            /mnt/real/work/report.md
+            /mnt/real/work/eval_*.json
+            /mnt/real/work/train_*.txt
+            /mnt/real/work/out/*.json
+            /mnt/real/corpus/corpus_summary.txt
+            /mnt/real/prepare.log
+            /mnt/real/pipeline.log
+
+      - name: Commit the models if they won
+        run: |
+          WIN=$(cat /mnt/real/work/SHIP 2>/dev/null || echo old)
+          echo "decision: $WIN"
+          if [ "$WIN" = "old" ]; then echo "Keeping the shipped models."; exit 0; fi
+          mkdir -p trained-models
+          cp /mnt/real/work/out/*.json trained-models/
+          cp /mnt/real/work/report.md trained-models/REPORT.md
+          git config user.name "github-actions"; git config user.email "actions@github.com"
+          git add trained-models
+          git commit -m "Models retrained on real recordings (see trained-models/REPORT.md)"
+          git pull --rebase --autostash || true
+          git push
